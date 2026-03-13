@@ -1,6 +1,6 @@
 # TESTING
 
-Este arquivo reúne, de forma mais objetiva, as camadas de teste aplicadas ao projeto.
+Este arquivo reúne, de forma objetiva, as camadas de teste aplicadas ao projeto.
 
 ## Objetivo
 
@@ -11,6 +11,7 @@ Como esta ferramenta lida com arquivos, o foco dos testes não é apenas verific
 - reação adequada a cenários perigosos
 - consistência do histórico local
 - previsibilidade da CLI em casos de erro
+- confiabilidade do restore após compactação de blobs
 
 ## Como rodar localmente
 
@@ -22,11 +23,11 @@ python -m unittest discover -s tests -v
 
 ## Cobertura automatizada atual
 
-A suíte automatizada cobre atualmente **38 testes**.
+A suíte automatizada cobre atualmente **51 testes**.
 
 Ela está dividida em três frentes:
 
-### 1. Testes do motor de sincronização
+## 1. Testes do motor de sincronização
 
 Arquivo:
 
@@ -37,6 +38,9 @@ Cobre, entre outros pontos:
 - cópia inicial e atualização de arquivos
 - `dry-run` sem escrita real
 - regras de ignore
+- filtros por extensão, tamanho e data de modificação
+- perfis nomeados salvos e executados pelo motor
+- barra de progresso via callback
 - restore de snapshots
 - bloqueio de restore sem `--overwrite`
 - rejeição de snapshot de `dry-run`
@@ -50,8 +54,9 @@ Cobre, entre outros pontos:
 - rollback quando a verificação final de integridade falha
 - bloqueio de execução concorrente por lock
 - stress test com centenas de arquivos
+- compactação de blobs com preservação do restore
 
-### 2. Testes do banco e histórico
+## 2. Testes do banco e histórico
 
 Arquivo:
 
@@ -60,10 +65,13 @@ Arquivo:
 Cobre:
 
 - reutilização de perfil existente
+- persistência e leitura de perfis nomeados
+- persistência de filtros avançados nas execuções
 - ordenação e limite do histórico
+- atualização do formato de armazenamento de blobs compactados
 - erro ao exportar relatório de execução inexistente
 
-### 3. Testes de integração da CLI
+## 3. Testes de integração da CLI
 
 Arquivo:
 
@@ -75,9 +83,12 @@ Cobre:
 - mensagens e códigos de saída
 - preview por padrão
 - necessidade explícita de `--apply`
+- filtros pela CLI
+- barra de progresso
 - fluxo completo `sync -> history -> report -> restore`
 - criação de relatórios em diretórios aninhados
-- respeito às regras de ignore pela CLI
+- perfis nomeados pela CLI
+- compactação via comando `compact`
 - bloqueio por lock já existente
 - rejeição de `state-dir` inseguro
 
@@ -98,8 +109,9 @@ Alguns cenários não são totalmente garantidos apenas com testes locais automa
 - arquivos abertos por outros programas reais
 - discos externos
 - pastas em rede
-- ACLs/permissões específicas de ambientes corporativos
+- ACLs e permissões específicas de ambientes corporativos
 - diferenças entre máquinas e configurações do sistema operacional
+- criação de symlink em ambientes que não liberam esse recurso
 
 ## Integração contínua
 

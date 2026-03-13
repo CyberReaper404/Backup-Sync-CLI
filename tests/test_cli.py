@@ -46,7 +46,7 @@ class BackupCliIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage: backup", result.stdout)
-        self.assertIn("{sync,history,report,restore}", result.stdout)
+        self.assertIn("{sync,history,report,restore,profile,compact}", result.stdout)
 
     def test_sync_history_report_and_restore_commands_work_together(self) -> None:
         (self.source / "docs").mkdir()
@@ -90,7 +90,7 @@ class BackupCliIntegrationTests(unittest.TestCase):
         result = self.run_cli("sync", str(self.source), str(self.destination))
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Mode: dry-run", result.stdout)
+        self.assertIn("Modo: dry-run", result.stdout)
         self.assertFalse((self.destination / "preview.txt").exists())
 
     def test_sync_creates_nested_report_directories(self) -> None:
@@ -133,22 +133,43 @@ class BackupCliIntegrationTests(unittest.TestCase):
         self.assertFalse((self.destination / "node_modules").exists())
         self.assertFalse((self.destination / "trace.log").exists())
 
+    def test_sync_accepts_filter_flags_from_cli(self) -> None:
+        (self.source / "keep.txt").write_text("1234567890", encoding="utf-8")
+        (self.source / "skip.log").write_text("1234567890", encoding="utf-8")
+        (self.source / "tiny.txt").write_text("1234", encoding="utf-8")
+
+        result = self.run_cli(
+            "sync",
+            str(self.source),
+            str(self.destination),
+            "--apply",
+            "--ext",
+            "txt",
+            "--min-size-bytes",
+            "10",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.destination / "keep.txt").exists())
+        self.assertFalse((self.destination / "skip.log").exists())
+        self.assertFalse((self.destination / "tiny.txt").exists())
+
     def test_restore_missing_run_returns_error_code(self) -> None:
         result = self.run_cli("restore", "999", str(self.restore))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Error: Run 999 was not found.", result.stderr)
+        self.assertIn("Erro: Run 999 was not found.", result.stderr)
 
     def test_report_missing_run_returns_error_code(self) -> None:
         output = self.reports / "missing.json"
         result = self.run_cli("report", "999", "--output", str(output))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Error: Run 999 was not found.", result.stderr)
+        self.assertIn("Erro: Run 999 was not found.", result.stderr)
         self.assertFalse(output.exists())
 
     def test_history_with_no_runs_is_friendly(self) -> None:
         result = self.run_cli("history")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("No runs found.", result.stdout)
+        self.assertIn("Nenhuma execucao encontrada.", result.stdout)
 
     def test_invocation_without_subcommand_returns_argparse_error(self) -> None:
         result = subprocess.run(
@@ -180,6 +201,67 @@ class BackupCliIntegrationTests(unittest.TestCase):
         apply_result = self.run_cli("sync", str(self.source), str(self.destination), "--apply")
         self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
         self.assertTrue((self.destination / "important.txt").exists())
+
+    def test_profile_save_list_show_and_run_work_together(self) -> None:
+        (self.source / "keep.txt").write_text("conteudo", encoding="utf-8")
+        (self.source / "skip.log").write_text("conteudo", encoding="utf-8")
+
+        save_result = self.run_cli(
+            "profile",
+            "save",
+            "daily",
+            str(self.source),
+            str(self.destination),
+            "--ignore",
+            "*.log",
+            "--ext",
+            "txt",
+        )
+        self.assertEqual(save_result.returncode, 0, save_result.stderr)
+        self.assertIn("Perfil salvo: daily", save_result.stdout)
+
+        list_result = self.run_cli("profile", "list", "--details")
+        self.assertEqual(list_result.returncode, 0, list_result.stderr)
+        self.assertIn("- daily", list_result.stdout)
+        self.assertIn("extensoes=['.txt']", list_result.stdout)
+
+        show_result = self.run_cli("profile", "show", "daily")
+        self.assertEqual(show_result.returncode, 0, show_result.stderr)
+        self.assertIn("Nome: daily", show_result.stdout)
+        self.assertIn("Filtros:", show_result.stdout)
+
+        run_result = self.run_cli("profile", "run", "daily", "--apply")
+        self.assertEqual(run_result.returncode, 0, run_result.stderr)
+        self.assertIn("Perfil: daily", run_result.stdout)
+        self.assertTrue((self.destination / "keep.txt").exists())
+        self.assertFalse((self.destination / "skip.log").exists())
+
+    def test_sync_with_progress_writes_progress_bar_to_stderr(self) -> None:
+        (self.source / "one.txt").write_text("1", encoding="utf-8")
+        (self.source / "two.txt").write_text("2", encoding="utf-8")
+
+        result = self.run_cli(
+            "sync",
+            str(self.source),
+            str(self.destination),
+            "--apply",
+            "--progress",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[", result.stderr)
+        self.assertIn("2/2", result.stderr)
+
+    def test_compact_command_reports_savings(self) -> None:
+        (self.source / "notes.txt").write_text("texto repetido\n" * 120, encoding="utf-8")
+        sync_result = self.run_cli("sync", str(self.source), str(self.destination), "--apply")
+        self.assertEqual(sync_result.returncode, 0, sync_result.stderr)
+
+        result = self.run_cli("compact")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Blobs compactados: 1", result.stdout)
+        self.assertIn("Bytes economizados:", result.stdout)
 
     def test_cli_rejects_state_directory_inside_source(self) -> None:
         risky_state = self.source / ".backup-state"

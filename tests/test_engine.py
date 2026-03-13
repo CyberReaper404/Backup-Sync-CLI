@@ -4,11 +4,13 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from safesync.database import StateDatabase
 from safesync.engine import SyncEngine
+from safesync.models import ProgressUpdate, SyncFilters
 from safesync.safety import state_operation_lock
 
 
@@ -80,6 +82,76 @@ class SyncEngineTests(unittest.TestCase):
         self.assertFalse((self.destination / "node_modules").exists())
         self.assertFalse((self.destination / "logs" / "app.log").exists())
 
+    def test_filters_by_extension_size_and_modified_date(self) -> None:
+        recent_text = self.source / "recent.txt"
+        recent_text.write_text("1234567890", encoding="utf-8")
+        large_text = self.source / "large.txt"
+        large_text.write_text("x" * 40, encoding="utf-8")
+        old_text = self.source / "old.txt"
+        old_text.write_text("1234567890", encoding="utf-8")
+        binary_file = self.source / "photo.bin"
+        binary_file.write_bytes(b"\x00" * 12)
+
+        old_timestamp = (datetime.now(UTC) - timedelta(days=5)).timestamp()
+        os.utime(old_text, (old_timestamp, old_timestamp))
+
+        run = self.engine.sync(
+            self.source,
+            self.destination,
+            dry_run=False,
+            filters=SyncFilters(
+                extensions=["txt"],
+                min_size_bytes=10,
+                max_size_bytes=20,
+                modified_after=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
+            ),
+        )
+
+        self.assertEqual(run.files_scanned, 1)
+        self.assertTrue((self.destination / "recent.txt").exists())
+        self.assertFalse((self.destination / "large.txt").exists())
+        self.assertFalse((self.destination / "old.txt").exists())
+        self.assertFalse((self.destination / "photo.bin").exists())
+
+    def test_progress_callback_receives_updates_for_each_file(self) -> None:
+        (self.source / "one.txt").write_text("1", encoding="utf-8")
+        (self.source / "two.txt").write_text("2", encoding="utf-8")
+        updates: list[ProgressUpdate] = []
+
+        self.engine.sync(
+            self.source,
+            self.destination,
+            dry_run=False,
+            progress_callback=updates.append,
+        )
+
+        self.assertEqual(len(updates), 2)
+        self.assertEqual(updates[-1].current, 2)
+        self.assertEqual(updates[-1].total, 2)
+        self.assertIn(updates[-1].action, {"copied", "updated", "skipped"})
+
+    def test_named_profile_save_and_run_reuses_saved_filters(self) -> None:
+        (self.source / "keep.txt").write_text("keep me", encoding="utf-8")
+        (self.source / "skip.log").write_text("skip me", encoding="utf-8")
+
+        profile = self.engine.save_profile(
+            name="daily",
+            source_dir=self.source,
+            destination_dir=self.destination,
+            filters=SyncFilters(ignore_patterns=["*.log"], extensions=["txt"]),
+        )
+        run = self.engine.run_profile("daily", dry_run=False)
+
+        self.assertEqual(profile.name, "daily")
+        self.assertEqual(run.profile_name, "daily")
+        self.assertTrue((self.destination / "keep.txt").exists())
+        self.assertFalse((self.destination / "skip.log").exists())
+        stored_run = self.database.get_run(run.run_id)
+        self.assertIsNotNone(stored_run)
+        assert stored_run is not None
+        self.assertEqual(stored_run["profile_name"], "daily")
+        self.assertEqual(stored_run["extensions"], [".txt"])
+
     def test_restore_recreates_saved_snapshot(self) -> None:
         (self.source / "appsettings.json").write_text('{"version": 1}', encoding="utf-8")
         first_run = self.engine.sync(self.source, self.destination, dry_run=False)
@@ -126,6 +198,35 @@ class SyncEngineTests(unittest.TestCase):
         self.assertEqual(payload["run"]["id"], run.run_id)
         self.assertEqual(payload["run"]["ignore_patterns"], ["*.bak"])
         self.assertEqual(payload["files"][0]["relative_path"], "file.txt")
+
+    def test_compact_blobs_preserves_restore_capability(self) -> None:
+        payload = ("texto repetido\n" * 200).encode("utf-8")
+        source_file = self.source / "docs" / "notes.txt"
+        source_file.parent.mkdir()
+        source_file.write_bytes(payload)
+
+        run = self.engine.sync(self.source, self.destination, dry_run=False)
+        summary = self.engine.compact_blobs(dry_run=False)
+        files = self.database.get_run_files(run.run_id)
+
+        self.assertGreaterEqual(summary.scanned_blobs, 1)
+        self.assertEqual(summary.compacted_blobs, 1)
+        self.assertGreater(summary.saved_bytes, 0)
+        self.assertEqual(files[0]["storage_format"], "gzip")
+
+        self.engine.restore(run.run_id, self.restore)
+        self.assertEqual((self.restore / "docs" / "notes.txt").read_bytes(), payload)
+
+    def test_compact_blobs_dry_run_does_not_change_storage_format(self) -> None:
+        (self.source / "notes.txt").write_text("texto repetido\n" * 100, encoding="utf-8")
+        run = self.engine.sync(self.source, self.destination, dry_run=False)
+
+        summary = self.engine.compact_blobs(dry_run=True)
+        files = self.database.get_run_files(run.run_id)
+
+        self.assertGreaterEqual(summary.scanned_blobs, 1)
+        self.assertGreaterEqual(summary.compacted_blobs, 1)
+        self.assertEqual(files[0]["storage_format"], "raw")
 
     def test_sync_rejects_invalid_root_configurations(self) -> None:
         missing = self.source / "missing"
